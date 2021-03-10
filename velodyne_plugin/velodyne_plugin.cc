@@ -5,6 +5,12 @@
 #include <gazebo/physics/physics.hh>
 #include <gazebo/transport/transport.hh>
 #include <gazebo/msgs/msgs.hh>
+//Ros dependencies
+#include <thread>
+#include "ros/ros.h"
+#include "ros/callback_queue.h"
+#include "ros/subscribe_options.h"
+#include "std_msgs/Float32.h"
 
 namespace gazebo
 {
@@ -43,31 +49,59 @@ namespace gazebo
 	      this->joint->GetScopedName(), this->pid);
 
 	  // Default to zero velocity
-	double velocity = 2;
+		double velocity = 2;
 
-	// Check that the velocity element exists, then read the value
-	if (_sdf->HasElement("velocity"))
-	  velocity = _sdf->Get<double>("velocity");
+		// Check that the velocity element exists, then read the value
+		if (_sdf->HasElement("velocity"))
+			velocity = _sdf->Get<double>("velocity");
 
-	// Set the joint's target velocity. This target velocity is just
-	// for demonstration purposes.
-	this->model->GetJointController()->SetVelocityTarget(
-	    this->joint->GetScopedName(), velocity);
+		// Set the joint's target velocity. This target velocity is just
+		// for demonstration purposes.
+		this->model->GetJointController()->SetVelocityTarget(
+				this->joint->GetScopedName(), velocity);
 
-	// Create the node
-	this->node = transport::NodePtr(new transport::Node());
-	#if GAZEBO_MAJOR_VERSION < 8
-	this->node->Init(this->model->GetWorld()->GetName());
-	#else
-	this->node->Init(this->model->GetWorld()->Name());
-	#endif
+		// Create the node
+		this->node = transport::NodePtr(new transport::Node());
+		#if GAZEBO_MAJOR_VERSION < 8
+		this->node->Init(this->model->GetWorld()->GetName());
+		#else
+		this->node->Init(this->model->GetWorld()->Name());
+		#endif
 
-	// Create a topic name
-	std::string topicName = "~/" + this->model->GetName() + "/vel_cmd";
+		// Create a topic name
+		std::string topicName = "~/" + this->model->GetName() + "/vel_cmd";
 
-	// Subscribe to the topic, and register a callback
-	this->sub = this->node->Subscribe(topicName,
-	   &VelodynePlugin::OnMsg, this);
+		// Subscribe to the topic, and register a callback
+		this->sub = this->node->Subscribe(topicName,
+			&VelodynePlugin::OnMsg, this);
+
+		///********************Setup ROS related stuff*******************************
+		// Initialize ros, if it has not already bee initialized.
+		if (!ros::isInitialized())
+		{
+			int argc = 0;
+			char **argv = NULL;
+			ros::init(argc, argv, "gazebo_client",
+					ros::init_options::NoSigintHandler);
+		}
+
+		// Create our ROS node. This acts in a similar manner to
+		// the Gazebo node
+		this->rosNode.reset(new ros::NodeHandle("gazebo_client"));
+
+		// Create a named topic, and subscribe to it.
+		ros::SubscribeOptions so =
+			ros::SubscribeOptions::create<std_msgs::Float32>(
+					"/" + this->model->GetName() + "/vel_cmd",
+					1,
+					boost::bind(&VelodynePlugin::OnRosMsg, this, _1),
+					ros::VoidPtr(), &this->rosQueue);
+
+		this->rosSub = this->rosNode->subscribe(so);
+
+		// Spin up the queue helper thread.
+		this->rosQueueThread = std::thread(std::bind(&VelodynePlugin::QueueThread, this));
+
 	}
 
 	public: void SetVelocity(const double &_vel)
@@ -81,6 +115,26 @@ namespace gazebo
 	{
 	  this->SetVelocity(_msg->x());
 	}
+
+	///**********************************ROS related functions***************************
+	/// \brief Handle an incoming message from ROS
+	/// \param[in] _msg A float value that is used to set the velocity
+	/// of the Velodyne.
+	public: void OnRosMsg(const std_msgs::Float32ConstPtr &_msg)
+	{
+		this->SetVelocity(_msg->data);
+	}
+
+	/// \brief ROS helper function that processes messages
+	private: void QueueThread()
+	{
+		static const double timeout = 0.01;
+		while (this->rosNode->ok())
+		{
+			this->rosQueue.callAvailable(ros::WallDuration(timeout));
+		}
+	}
+	
 
 
 	/// \brief Pointer to the model.
@@ -104,6 +158,19 @@ namespace gazebo
 	/// \brief Handle incoming message
 	/// \param[in] _msg Repurpose a vector3 message. This function will
 	/// only use the x component.
+
+	///*********************************ROS member vairables**********************************
+	/// \brief A node use for ROS transport
+	private: std::unique_ptr<ros::NodeHandle> rosNode;
+
+	/// \brief A ROS subscriber
+	private: ros::Subscriber rosSub;
+
+	/// \brief A ROS callbackqueue that helps process messages
+	private: ros::CallbackQueue rosQueue;
+
+	/// \brief A thread the keeps running the rosQueue
+	private: std::thread rosQueueThread;
 	
   };
 
